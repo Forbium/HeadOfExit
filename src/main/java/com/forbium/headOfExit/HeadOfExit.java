@@ -12,8 +12,11 @@ public final class HeadOfExit extends JavaPlugin implements Listener {
     public void onEnable() {
         this.headManager = new HeadManager(this);
         getServer().getPluginManager().registerEvents(new HeadListener(this, headManager), this);
-        saveDefaultConfig();
         this.langManager = new LangManager(this);
+
+        saveDefaultConfig();
+        saveResource("lang/ru.yml", false);
+        saveResource("lang/en.yml", false);
     }
 
     @Override

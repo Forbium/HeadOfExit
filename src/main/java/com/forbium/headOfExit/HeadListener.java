@@ -2,13 +2,20 @@ package com.forbium.headOfExit;
 
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.Skull;
+import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.ItemFrame;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.*;
@@ -114,6 +121,8 @@ public class HeadListener implements Listener {
         }
 
         Block block = e.getBlockPlaced();
+
+        // Записываем UUID в PDC блока
         org.bukkit.block.Skull skull = (org.bukkit.block.Skull) block.getState();
         skull.getPersistentDataContainer().set(
                 new NamespacedKey(plugin, "head_owner"),
@@ -122,54 +131,83 @@ public class HeadListener implements Listener {
         );
         skull.update();
 
-        // Голова поставлена блоком — убираем держателя, сохраняем координаты
-        headManager.saveHeadLocation(ownerUUID, block.getLocation());
+        // Регистрируем как стопку а не просто координаты
+        headManager.saveHeadInPile(ownerUUID, block.getLocation());
 
         player.sendMessage(plugin.getLang().get("head-placed"));
     }
 
-    // Запрет класть голову в хранилища (сундуки, шалкеры и т.д.)
+    // Метод 1: запрет класть голову в хранилище (работает всегда)
     @EventHandler(priority = EventPriority.HIGH)
     public void onInventoryClick(InventoryClickEvent e) {
         if (!(e.getWhoClicked() instanceof Player player)) return;
 
-        // Проверяем что это инвентарь стопки
+        if (headManager.isPlayerHead(e.getCursor())) {
+            if (e.getInventory().getType() != InventoryType.PLAYER &&
+                    e.getInventory().getType() != InventoryType.CRAFTING) {
+                e.setCancelled(true);
+                player.sendMessage(plugin.getLang().get("cannot-store-head"));
+                return;
+            }
+        }
+
+        // Shift+click
+        if (headManager.isPlayerHead(e.getCurrentItem())
+                && e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) {
+            e.setCancelled(true);
+            player.sendMessage(plugin.getLang().get("cannot-store-head"));
+            return;
+        }
+
+        // Цифры 1-9
+        if (e.getAction() == InventoryAction.HOTBAR_SWAP
+                || e.getAction() == InventoryAction.HOTBAR_MOVE_AND_READD) {
+            int hotbarSlot = e.getHotbarButton();
+            if (hotbarSlot >= 0) {
+                ItemStack hotbarItem = player.getInventory().getItem(hotbarSlot);
+                if (headManager.isPlayerHead(hotbarItem)) {
+                    e.setCancelled(true);
+                    player.sendMessage(plugin.getLang().get("cannot-store-head"));
+                    return;
+                }
+            }
+            if (headManager.isPlayerHead(e.getCurrentItem())) {
+                e.setCancelled(true);
+                player.sendMessage(plugin.getLang().get("cannot-store-head"));
+            }
+        }
+    }
+
+    // Метод 2: логика инвентаря стопки
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onPileInventoryClick(InventoryClickEvent e) {
+        if (!(e.getWhoClicked() instanceof Player player)) return;
         if (!e.getView().getTitle().equals(plugin.getLang().get("head-inventory"))) return;
-        if (e.getClickedInventory()==e.getView().getBottomInventory())return;
+
+        e.setCancelled(true);
+
+        if (e.getClickedInventory() == e.getView().getBottomInventory()) return;
 
         ItemStack item = e.getCurrentItem();
-        if (item == null || item.getType() == Material.AIR) {
-            e.setCancelled(true);
-            return;
-        }
+        if (item == null || item.getType() == Material.AIR) return;
 
         UUID ownerUUID = headManager.getOwnerFromItem(item);
-        if (ownerUUID == null) {
-            e.setCancelled(true);
-            return;
-        }
+        if (ownerUUID == null) return;
 
-        // Нельзя взять свою голову
         if (ownerUUID.equals(player.getUniqueId())) {
-            e.setCancelled(true);
             player.sendMessage(plugin.getLang().get("cannot-take-own-head"));
             return;
         }
 
-        // Проверяем место в инвентаре
         HashMap<Integer, ItemStack> leftover = player.getInventory().addItem(item.clone());
         if (!leftover.isEmpty()) {
-            e.setCancelled(true);
             player.sendMessage(plugin.getLang().get("no-inventory-space"));
             return;
         }
 
-        // Убираем голову из стопки
-        e.setCancelled(true);
         e.getClickedInventory().remove(item);
         headManager.removeHeadFromPile(ownerUUID);
         headManager.saveHeadHolder(ownerUUID, player.getUniqueId());
-
         player.sendMessage(plugin.getLang().get("head-picked-up"));
     }
 
@@ -186,17 +224,6 @@ public class HeadListener implements Listener {
                 return;
             }
         }
-    }
-
-    // Запрет подбирать голову с земли (если вдруг выпала)
-    @EventHandler
-    public void onPickup(EntityPickupItemEvent e) {
-        if (!(e.getEntity() instanceof Player player)) return;
-        if (!headManager.isPlayerHead(e.getItem().getItemStack())) return;
-
-        // Разрешаем подбор только если голова выпала из блока (обрабатывается в BlockBreak)
-        // Этот ивент на всякий случай — голова не должна выпадать вообще
-        // Можно оставить или убрать по желанию
     }
 
     // Проверяет является ли инвентарь хранилищем (не инвентарём игрока)
@@ -272,5 +299,63 @@ public class HeadListener implements Listener {
         }
     }
 
+    @EventHandler
+    public void onFrameInteract(PlayerInteractEntityEvent e) {
+        if (!(e.getRightClicked() instanceof ItemFrame)) return;
 
+        ItemFrame frame = (ItemFrame) e.getRightClicked();
+        Player player = e.getPlayer();
+
+        ItemStack itemInHand = player.getInventory().getItemInMainHand();
+        ItemStack itemInOffHand = player.getInventory().getItemInOffHand();
+
+        if (frame.getItem().getType() == Material.AIR) {
+            UUID headID = headManager.getOwnerFromItem(itemInHand);
+
+            if (headID != null) {
+                e.setCancelled(true);
+            } else {
+                headID = headManager.getOwnerFromItem(itemInOffHand);
+                if (headID != null) {
+                    e.setCancelled(true);
+                }
+            }
+        }
+    }
+
+    @EventHandler
+    public void onArmorStandInteract(PlayerArmorStandManipulateEvent e) {
+        if (plugin.getConfig().getString("language", "can-hold-armor-stand").equals("false")) return;
+        if (e.getSlot() != EquipmentSlot.HEAD) return;
+
+        Player player = e.getPlayer();
+        ItemStack itemInHand = e.getPlayerItem();
+        ItemStack itemOnStand = e.getArmorStandItem();
+
+        if (itemOnStand != null && itemOnStand.getType() != Material.AIR) {
+            UUID headID = headManager.getOwnerFromItem(itemOnStand);
+            if (headID != null) {
+                headManager.saveHeadHolder(headID, player.getUniqueId());
+                e.getRightClicked().setInvulnerable(false);
+            }
+        }
+
+        if (itemInHand != null && itemInHand.getType() != Material.AIR) {
+            UUID headID = headManager.getOwnerFromItem(itemInHand);
+            if (headID != null) {
+                headManager.saveHeadHolder(headID, e.getRightClicked().getUniqueId());
+                e.getRightClicked().setInvulnerable(true);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onEntityExplode(EntityExplodeEvent e) {
+        e.blockList().removeIf(block -> headManager.isPile(block.getLocation()));
+    }
+
+    @EventHandler
+    public void onBlockExplode(BlockExplodeEvent e) {
+        e.blockList().removeIf(block -> headManager.isPile(block.getLocation()));
+    }
 }
